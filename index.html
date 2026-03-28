@@ -30,7 +30,7 @@ canvas { display: block; }
   z-index: 10;
   pointer-events: all;
 }
-#overlay.hidden { display: none; pointer-events: none; }
+#overlay.hidden { display: none; }
 #overlay h1 { color: #e8a838; font-size: 32px; margin-bottom: 8px; text-shadow: 0 3px 6px rgba(0,0,0,0.5); }
 #overlay h2 { color: #f4e4c1; font-size: 20px; margin-bottom: 15px; }
 #overlay p { color: #ccc; font-size: 14px; margin-bottom: 20px; text-align: center; padding: 0 30px; max-width: 300px; }
@@ -51,10 +51,12 @@ canvas { display: block; }
   <div id="level-info">Level 1</div>
   <div id="shots">🏹 5</div>
 </div>
-<div id="overlay">
+<div id="overlay" class="hidden">
   <h1>⚔️ Ballista Siege</h1>
-  <p>Drag back on the ballista to aim and fire! Destroy all structures and enemies to win.</p>
-  <button class="btn" id="startBtn">Begin Siege</button>
+  <div class="stars" id="result-stars"></div>
+  <h2 id="result-text"></h2>
+  <p id="result-detail"></p>
+  <button class="btn" id="actionBtn" onclick="handleAction()">Next Level</button>
 </div>
 
 <script>
@@ -319,22 +321,23 @@ function checkLevelEnd() {
   }
 }
 
+function handleAction() {
+  if (levelFailed) retryLevel();
+  else nextLevel();
+}
+
 function showOverlay(type) {
   overlay.classList.remove('hidden');
   if (type === 'win') {
-    overlay.innerHTML = `
-      <h1>⚔️ Victory!</h1>
-      <div class="stars">${'⭐'.repeat(stars)}${'☆'.repeat(3 - stars)}</div>
-      <h2>Score: ${score}</h2>
-      <p>Shots remaining: ${shotsLeft}</p>
-      <button class="btn" onclick="nextLevel()">Next Level</button>
-    `;
+    document.getElementById('result-stars').textContent = '⭐'.repeat(stars) + '☆'.repeat(3 - stars);
+    document.getElementById('result-text').textContent = `Score: ${score}`;
+    document.getElementById('result-detail').textContent = `Shots remaining: ${shotsLeft}`;
+    document.getElementById('actionBtn').textContent = 'Next Level';
   } else {
-    overlay.innerHTML = `
-      <h1>💀 Defeat</h1>
-      <p>Enemies survived! Try again?</p>
-      <button class="btn" onclick="retryLevel()">Retry</button>
-    `;
+    document.getElementById('result-stars').textContent = '💀';
+    document.getElementById('result-text').textContent = 'Defeat!';
+    document.getElementById('result-detail').textContent = 'Enemies survived! Try again?';
+    document.getElementById('actionBtn').textContent = 'Retry';
   }
 }
 
@@ -851,15 +854,13 @@ function gameLoop(timestamp) {
   requestAnimationFrame(gameLoop);
 }
 
-function startGame() {
-  score = 0;
-  level = 1;
-  overlay.classList.add('hidden');
-  loadLevel(level);
-}
+// Start immediately
+score = 0;
+level = 1;
+loadLevel(level);
 
-startBtn.addEventListener('click', (e) => { e.stopPropagation(); startGame(); });
-startBtn.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); startGame(); });
+startBtn.addEventListener('click', (e) => { e.stopPropagation(); handleAction(); });
+startBtn.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); handleAction(); });
 
 window.addEventListener('resize', () => {
   resize();
