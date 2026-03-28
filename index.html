@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
 <title>Ballista Siege</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -27,21 +26,24 @@ canvas { display: block; }
   position: absolute; top: 0; left: 0; width: 100%; height: 100%;
   background: rgba(0,0,0,0.75);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  z-index: 10;
-  pointer-events: all;
+  z-index: 10; pointer-events: all;
 }
 #overlay.hidden { display: none; }
-#overlay h1 { color: #e8a838; font-size: 32px; margin-bottom: 8px; text-shadow: 0 3px 6px rgba(0,0,0,0.5); }
-#overlay h2 { color: #f4e4c1; font-size: 20px; margin-bottom: 15px; }
-#overlay p { color: #ccc; font-size: 14px; margin-bottom: 20px; text-align: center; padding: 0 30px; max-width: 300px; }
-#overlay .stars { font-size: 40px; margin-bottom: 15px; }
+#overlay h1 { color: #e8a838; font-size: 32px; margin-bottom: 8px; }
+#overlay .stars { font-size: 40px; margin-bottom: 10px; }
+#overlay h2 { color: #f4e4c1; font-size: 20px; margin-bottom: 10px; }
+#overlay p { color: #ccc; font-size: 14px; margin-bottom: 20px; text-align: center; padding: 0 30px; }
 .btn {
   background: #8b4513; color: #f4e4c1; border: 2px solid #e8a838;
   padding: 12px 36px; font-size: 17px; border-radius: 8px;
   cursor: pointer; font-weight: bold; font-family: 'Georgia', serif;
-  transition: transform 0.1s;
 }
 .btn:active { transform: scale(0.95); background: #a0522d; }
+#instructions {
+  position: absolute; bottom: 15px; left: 50%; transform: translateX(-50%);
+  color: rgba(255,255,255,0.5); font-size: 13px; pointer-events: none;
+  text-align: center; white-space: nowrap;
+}
 </style>
 </head>
 <body>
@@ -52,225 +54,342 @@ canvas { display: block; }
   <div id="shots">🏹 5</div>
 </div>
 <div id="overlay" class="hidden">
-  <h1>⚔️ Ballista Siege</h1>
+  <h1 id="overlay-title">⚔️ Victory!</h1>
   <div class="stars" id="result-stars"></div>
   <h2 id="result-text"></h2>
   <p id="result-detail"></p>
-  <button class="btn" id="actionBtn" onclick="handleAction()">Next Level</button>
+  <button class="btn" id="actionBtn">Next Level</button>
 </div>
+<div id="instructions">Drag from ballista to aim & fire</div>
 
 <script>
-const { Engine, Render, Runner, Bodies, Body, Composite, Events, Mouse, MouseConstraint, Vector, Constraint, World } = Matter;
-
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 const scoreEl = document.getElementById('score');
 const shotsEl = document.getElementById('shots');
 const levelEl = document.getElementById('level-info');
 const overlay = document.getElementById('overlay');
-const startBtn = document.getElementById('startBtn');
+const actionBtn = document.getElementById('actionBtn');
+const instrEl = document.getElementById('instructions');
 
 let W, H, GROUND_Y;
-let engine, world;
-let score = 0;
-let shotsLeft = 5;
-let level = 1;
-let aiming = false;
-let aimStart = null;
-let aimCurrent = null;
-let ballistaPos = { x: 0, y: 0 };
+let score = 0, shotsLeft = 5, level = 1;
+let bodies = [];
+let particles = [];
 let projectile = null;
-let projectileFired = false;
-let firedProjectiles = [];
-let enemies = [];
-let blocks = [];
-let settled = false;
+let fired = false;
 let settleTimer = 0;
-let levelComplete = false;
-let levelFailed = false;
+let levelDone = false, levelWon = false;
+let aiming = false, aimX = 0, aimY = 0;
 let stars = 0;
-let groundBody;
-let wallBodies = [];
 
-// Physics constants
-const BALLISTA_POWER = 0.045;
-const PROJECTILE_RADIUS = 12;
-const SETTLE_THRESHOLD = 0.3;
+const GRAVITY = 0.4;
+const DAMPING = 0.98;
+const FRICTION = 0.7;
+const BOUNCE = 0.3;
+
+// Ballista position
+let BL_X, BL_Y;
 
 function resize() {
   W = canvas.width = window.innerWidth;
   H = canvas.height = window.innerHeight;
-  GROUND_Y = H - 50;
-  ballistaPos = { x: 80, y: GROUND_Y - 30 };
+  GROUND_Y = H - 60;
+  BL_X = Math.min(90, W * 0.12);
+  BL_Y = GROUND_Y - 10;
 }
 
-function initPhysics() {
-  engine = Engine.create({ gravity: { x: 0, y: 1.5 } });
-  world = engine.world;
-
-  // Ground
-  groundBody = Bodies.rectangle(W / 2, GROUND_Y + 25, W * 2, 50, {
-    isStatic: true, friction: 0.9, restitution: 0.1,
-    render: { fillStyle: '#4a7c3f' }
-  });
-
-  // Walls (invisible)
-  const wallL = Bodies.rectangle(-25, H / 2, 50, H * 2, { isStatic: true });
-  const wallR = Bodies.rectangle(W + 25, H / 2, 50, H * 2, { isStatic: true });
-
-  Composite.add(world, [groundBody, wallL, wallR]);
-  wallBodies = [groundBody, wallL, wallR];
-}
-
-function createProjectile(x, y) {
-  const p = Bodies.circle(x, y, PROJECTILE_RADIUS, {
-    density: 0.004,
-    friction: 0.3,
-    restitution: 0.4,
-    render: { fillStyle: '#333' }
-  });
-  p.isProjectile = true;
-  p.damage = 2;
-  return p;
-}
-
-function createBlock(x, y, w, h, material) {
-  const props = {
-    friction: 0.8,
-    restitution: 0.05,
+// Simple physics body
+function makeRect(x, y, w, h, mat) {
+  const density = mat === 'stone' ? 3 : (mat === 'wood' ? 1.5 : 0.8);
+  return {
+    type: 'rect', x, y, w, h, mat,
+    vx: 0, vy: 0, angle: 0, va: 0,
+    mass: w * h * density * 0.001,
+    hp: mat === 'stone' ? 4 : (mat === 'wood' ? 2 : 1),
+    maxHp: mat === 'stone' ? 4 : (mat === 'wood' ? 2 : 1),
+    alive: true, settled: false
   };
-  if (material === 'wood') {
-    props.density = 0.003;
-    props.hp = 2;
-    props.color = '#8B6914';
-    props.breakColor = '#6B4F10';
-  } else if (material === 'stone') {
-    props.density = 0.006;
-    props.hp = 4;
-    props.color = '#808080';
-    props.breakColor = '#606060';
-  } else if (material === 'glass') {
-    props.density = 0.001;
-    props.hp = 1;
-    props.color = '#87CEEB';
-    props.breakColor = '#5BA3C9';
+}
+
+function makeCircle(x, y, r, isEnemy) {
+  return {
+    type: 'circle', x, y, r, isEnemy,
+    vx: 0, vy: 0, angle: 0, va: 0,
+    mass: r * r * 0.001,
+    hp: isEnemy ? 1 : 999,
+    alive: true, settled: false
+  };
+}
+
+function makeProjectile(x, y) {
+  return {
+    type: 'projectile', x, y, r: 13,
+    vx: 0, vy: 0,
+    mass: 0.01,
+    alive: true, fired: false
+  };
+}
+
+// AABB collision for rects
+function rectAABB(b) {
+  return {
+    left: b.x - b.w/2, right: b.x + b.w/2,
+    top: b.y - b.h/2, bottom: b.y + b.h/2
+  };
+}
+
+function resolveRectCircle(rect, circ) {
+  const a = rectAABB(rect);
+  const cx = Math.max(a.left, Math.min(circ.x, a.right));
+  const cy = Math.max(a.top, Math.min(circ.y, a.bottom));
+  const dx = circ.x - cx;
+  const dy = circ.y - cy;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  if (dist < circ.r && dist > 0) {
+    const overlap = circ.r - dist;
+    const nx = dx / dist;
+    const ny = dy / dist;
+    return { nx, ny, overlap, dist };
   }
-  const b = Bodies.rectangle(x, y, w, h, props);
-  b.isBlock = true;
-  b.material = material;
-  b.hp = props.hp;
-  b.maxHp = props.hp;
-  b.color = props.color;
-  b.breakColor = props.breakColor;
-  b.width = w;
-  b.height = h;
-  return b;
+  return null;
 }
 
-function createEnemy(x, y) {
-  const e = Bodies.circle(x, y, 15, {
-    density: 0.001,
-    friction: 0.5,
-    restitution: 0.2,
-    render: { fillStyle: '#cc3333' }
-  });
-  e.isEnemy = true;
-  e.hp = 1;
-  e.radius = 15;
-  return e;
+function resolveRectRect(a, b) {
+  const aa = rectAABB(a);
+  const ab = rectAABB(b);
+  const ox = Math.min(aa.right - ab.left, ab.right - aa.left);
+  const oy = Math.min(aa.bottom - ab.top, ab.bottom - aa.top);
+  if (ox > 0 && oy > 0) {
+    if (ox < oy) {
+      const nx = (a.x < b.x) ? -1 : 1;
+      return { nx, ny: 0, overlap: ox };
+    } else {
+      const ny = (a.y < b.y) ? -1 : 1;
+      return { nx: 0, ny, overlap: oy };
+    }
+  }
+  return null;
 }
 
+function resolveCircleCircle(a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+  const minDist = a.r + b.r;
+  if (dist < minDist && dist > 0) {
+    const overlap = minDist - dist;
+    return { nx: dx/dist, ny: dy/dist, overlap };
+  }
+  return null;
+}
+
+function applyImpulse(a, b, nx, ny, speed) {
+  const totalMass = a.mass + b.mass;
+  const aFactor = b.mass / totalMass;
+  const bFactor = a.mass / totalMass;
+  a.vx -= nx * speed * aFactor * (1 + BOUNCE);
+  a.vy -= ny * speed * aFactor * (1 + BOUNCE);
+  b.vx += nx * speed * bFactor * (1 + BOUNCE);
+  b.vy += ny * speed * bFactor * (1 + BOUNCE);
+  a.settled = false;
+  b.settled = false;
+}
+
+function physicsStep() {
+  // Gravity
+  for (const b of bodies) {
+    if (!b.alive || b === projectile && !projectile.fired) continue;
+    b.vy += GRAVITY;
+    b.vx *= DAMPING;
+    b.vy *= DAMPING;
+    b.va *= 0.95;
+    b.x += b.vx;
+    b.y += b.vy;
+    b.angle += b.va;
+  }
+
+  // Collisions
+  for (let i = 0; i < bodies.length; i++) {
+    const a = bodies[i];
+    if (!a.alive) continue;
+
+    // Ground
+    let bottom = a.y + (a.r || a.h/2);
+    if (bottom > GROUND_Y) {
+      const penetration = bottom - GROUND_Y;
+      a.y -= penetration;
+      if (Math.abs(a.vy) > 2) {
+        a.hp = (a.hp || 1) - Math.floor(Math.abs(a.vy) / 6);
+        if (a.hp <= 0 && a.type !== 'projectile') destroyBody(a);
+      }
+      a.vy *= -BOUNCE;
+      a.vx *= FRICTION;
+      a.va *= 0.8;
+    }
+
+    // Walls
+    let left = a.x - (a.r || a.w/2);
+    let right = a.x + (a.r || a.w/2);
+    if (left < 0) { a.x = a.r || a.w/2; a.vx *= -BOUNCE; }
+    if (right > W) { a.x = W - (a.r || a.w/2); a.vx *= -BOUNCE; }
+
+    // Body-body
+    for (let j = i + 1; j < bodies.length; j++) {
+      const b = bodies[j];
+      if (!b.alive) continue;
+
+      let col = null;
+      if (a.type === 'circle' || a.type === 'projectile') {
+        if (b.type === 'rect') col = resolveRectCircle(b, a);
+        else col = resolveCircleCircle(a, b);
+      } else if (a.type === 'rect') {
+        if (b.type === 'rect') col = resolveRectRect(a, b);
+        else col = resolveRectCircle(a, b);
+      }
+
+      if (col) {
+        // Separate
+        const sep = col.overlap / 2;
+        a.x -= col.nx * sep;
+        a.y -= col.ny * sep;
+        b.x += col.nx * sep;
+        b.y += col.ny * sep;
+
+        // Impulse
+        const relVx = a.vx - b.vx;
+        const relVy = a.vy - b.vy;
+        const relSpeed = Math.sqrt(relVx * relVx + relVy * relVy);
+        applyImpulse(a, b, col.nx, col.ny, relSpeed * 0.5);
+
+        // Damage
+        if (relSpeed > 3) {
+          const dmg = relSpeed > 8 ? 3 : (relSpeed > 5 ? 2 : 1);
+          if (a.type !== 'projectile' && a !== b) {
+            a.hp -= dmg;
+            if (a.hp <= 0) destroyBody(a);
+          }
+          if (b.type !== 'projectile') {
+            b.hp -= dmg;
+            if (b.hp <= 0) destroyBody(b);
+          }
+        }
+      }
+    }
+  }
+
+  // Cleanup off-screen projectiles
+  if (projectile && projectile.fired) {
+    if (projectile.y > H + 100 || projectile.x < -100 || projectile.x > W + 100) {
+      projectile.alive = false;
+    }
+  }
+}
+
+function destroyBody(b) {
+  if (!b.alive) return;
+  b.alive = false;
+  const color = b.mat === 'stone' ? '#808080' : (b.mat === 'wood' ? '#8B6914' : (b.isEnemy ? '#cc3333' : '#87CEEB'));
+  for (let i = 0; i < 6; i++) {
+    particles.push({
+      x: b.x, y: b.y,
+      vx: (Math.random() - 0.5) * 8,
+      vy: -Math.random() * 6 - 2,
+      size: 3 + Math.random() * 5,
+      color, life: 1.0,
+      rot: Math.random() * 6
+    });
+  }
+  if (b.isEnemy) { score += 200; updateUI(); }
+  else { score += 50; updateUI(); }
+}
+
+function allSettled() {
+  for (const b of bodies) {
+    if (!b.alive || (b.type === 'projectile' && !b.fired)) continue;
+    if (Math.abs(b.vx) > 0.3 || Math.abs(b.vy) > 0.3) return false;
+  }
+  return true;
+}
+
+// Levels
 function loadLevel(n) {
-  // Clear old objects
-  Composite.clear(world, false);
-  Composite.add(world, wallBodies);
-  firedProjectiles = [];
-  enemies = [];
-  blocks = [];
+  bodies = [];
+  particles = [];
   projectile = null;
-  projectileFired = false;
-  settled = false;
+  fired = false;
   settleTimer = 0;
-  levelComplete = false;
-  levelFailed = false;
-  stars = 0;
+  levelDone = false;
+  levelWon = false;
 
-  const bx = W * 0.65; // base x for structures
+  const bx = W * 0.62;
 
   if (n === 1) {
     shotsLeft = 5;
-    // Simple tower
-    blocks.push(createBlock(bx, GROUND_Y - 20, 80, 40, 'wood'));
-    blocks.push(createBlock(bx - 20, GROUND_Y - 60, 20, 40, 'wood'));
-    blocks.push(createBlock(bx + 20, GROUND_Y - 60, 20, 40, 'wood'));
-    blocks.push(createBlock(bx, GROUND_Y - 90, 80, 20, 'wood'));
-    enemies.push(createEnemy(bx, GROUND_Y - 115));
+    bodies.push(makeRect(bx, GROUND_Y - 25, 90, 50, 'wood'));
+    bodies.push(makeRect(bx - 25, GROUND_Y - 70, 22, 40, 'wood'));
+    bodies.push(makeRect(bx + 25, GROUND_Y - 70, 22, 40, 'wood'));
+    bodies.push(makeRect(bx, GROUND_Y - 100, 90, 20, 'wood'));
+    bodies.push(makeCircle(bx, GROUND_Y - 120, 16, true));
   } else if (n === 2) {
     shotsLeft = 5;
-    // Two towers with bridge
-    blocks.push(createBlock(bx - 40, GROUND_Y - 20, 20, 40, 'stone'));
-    blocks.push(createBlock(bx + 40, GROUND_Y - 20, 20, 40, 'stone'));
-    blocks.push(createBlock(bx, GROUND_Y - 50, 120, 20, 'wood'));
-    blocks.push(createBlock(bx - 25, GROUND_Y - 75, 20, 30, 'wood'));
-    blocks.push(createBlock(bx + 25, GROUND_Y - 75, 20, 30, 'wood'));
-    blocks.push(createBlock(bx, GROUND_Y - 100, 80, 20, 'wood'));
-    enemies.push(createEnemy(bx - 20, GROUND_Y - 120));
-    enemies.push(createEnemy(bx + 20, GROUND_Y - 120));
+    bodies.push(makeRect(bx - 45, GROUND_Y - 25, 22, 50, 'stone'));
+    bodies.push(makeRect(bx + 45, GROUND_Y - 25, 22, 50, 'stone'));
+    bodies.push(makeRect(bx, GROUND_Y - 60, 130, 20, 'wood'));
+    bodies.push(makeRect(bx - 25, GROUND_Y - 90, 22, 40, 'wood'));
+    bodies.push(makeRect(bx + 25, GROUND_Y - 90, 22, 40, 'wood'));
+    bodies.push(makeRect(bx, GROUND_Y - 120, 90, 20, 'wood'));
+    bodies.push(makeCircle(bx - 20, GROUND_Y - 140, 16, true));
+    bodies.push(makeCircle(bx + 20, GROUND_Y - 140, 16, true));
   } else if (n === 3) {
     shotsLeft = 6;
-    // Fortress
-    blocks.push(createBlock(bx, GROUND_Y - 20, 160, 40, 'stone'));
-    blocks.push(createBlock(bx - 60, GROUND_Y - 55, 20, 50, 'stone'));
-    blocks.push(createBlock(bx - 20, GROUND_Y - 55, 20, 50, 'wood'));
-    blocks.push(createBlock(bx + 20, GROUND_Y - 55, 20, 50, 'wood'));
-    blocks.push(createBlock(bx + 60, GROUND_Y - 55, 20, 50, 'stone'));
-    blocks.push(createBlock(bx, GROUND_Y - 85, 160, 20, 'stone'));
-    blocks.push(createBlock(bx - 30, GROUND_Y - 110, 20, 30, 'glass'));
-    blocks.push(createBlock(bx + 30, GROUND_Y - 110, 20, 30, 'glass'));
-    blocks.push(createBlock(bx, GROUND_Y - 135, 80, 20, 'wood'));
-    enemies.push(createEnemy(bx - 20, GROUND_Y - 155));
-    enemies.push(createEnemy(bx + 20, GROUND_Y - 155));
-    enemies.push(createEnemy(bx, GROUND_Y - 50));
+    bodies.push(makeRect(bx, GROUND_Y - 25, 180, 50, 'stone'));
+    bodies.push(makeRect(bx - 65, GROUND_Y - 65, 22, 60, 'stone'));
+    bodies.push(makeRect(bx - 25, GROUND_Y - 65, 22, 60, 'wood'));
+    bodies.push(makeRect(bx + 25, GROUND_Y - 65, 22, 60, 'wood'));
+    bodies.push(makeRect(bx + 65, GROUND_Y - 65, 22, 60, 'stone'));
+    bodies.push(makeRect(bx, GROUND_Y - 100, 180, 20, 'stone'));
+    bodies.push(makeRect(bx - 35, GROUND_Y - 130, 22, 40, 'glass'));
+    bodies.push(makeRect(bx + 35, GROUND_Y - 130, 22, 40, 'glass'));
+    bodies.push(makeRect(bx, GROUND_Y - 160, 100, 20, 'wood'));
+    bodies.push(makeCircle(bx - 20, GROUND_Y - 180, 16, true));
+    bodies.push(makeCircle(bx + 20, GROUND_Y - 180, 16, true));
+    bodies.push(makeCircle(bx, GROUND_Y - 55, 16, true));
   } else if (n === 4) {
     shotsLeft = 7;
-    // Pyramid
     for (let row = 0; row < 4; row++) {
       const count = 5 - row;
-      const startX = bx - (count - 1) * 22;
-      const y = GROUND_Y - 20 - row * 40;
+      const sx = bx - (count - 1) * 24;
+      const y = GROUND_Y - 25 - row * 45;
       const mat = row < 2 ? 'stone' : (row === 2 ? 'wood' : 'glass');
       for (let i = 0; i < count; i++) {
-        blocks.push(createBlock(startX + i * 44, y, 40, 35, mat));
+        bodies.push(makeRect(sx + i * 48, y, 44, 40, mat));
       }
     }
-    enemies.push(createEnemy(bx, GROUND_Y - 180));
-    enemies.push(createEnemy(bx - 44, GROUND_Y - 140));
-    enemies.push(createEnemy(bx + 44, GROUND_Y - 140));
-  } else if (n >= 5) {
+    bodies.push(makeCircle(bx, GROUND_Y - 210, 16, true));
+    bodies.push(makeCircle(bx - 48, GROUND_Y - 165, 16, true));
+    bodies.push(makeCircle(bx + 48, GROUND_Y - 165, 16, true));
+  } else {
     shotsLeft = 8;
-    // Random fortress
-    const bw = 120 + Math.random() * 80;
     const bh = 3 + Math.floor(Math.random() * 3);
+    const cols = 3 + Math.floor(Math.random() * 2);
     for (let row = 0; row < bh; row++) {
-      const count = Math.floor(bw / 44);
-      const startX = bx - (count - 1) * 22;
-      const y = GROUND_Y - 20 - row * 40;
-      const mat = ['wood', 'stone', 'glass'][Math.floor(Math.random() * 3)];
+      const count = cols + (bh - row - 1);
+      const sx = bx - (count - 1) * 24;
+      const y = GROUND_Y - 25 - row * 45;
+      const mat = ['wood','stone','glass'][Math.floor(Math.random()*3)];
       for (let i = 0; i < count; i++) {
-        blocks.push(createBlock(startX + i * 44, y, 40, 35, mat));
+        bodies.push(makeRect(sx + i * 48, y, 44, 40, mat));
       }
     }
-    const eCount = 2 + Math.floor(Math.random() * 3);
-    for (let i = 0; i < eCount; i++) {
-      enemies.push(createEnemy(bx - 30 + Math.random() * 60, GROUND_Y - 40 - bh * 40 - Math.random() * 30));
+    const ec = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < ec; i++) {
+      bodies.push(makeCircle(bx - 30 + i * 30, GROUND_Y - 40 - bh * 45, 16, true));
     }
   }
 
-  Composite.add(world, [...blocks, ...enemies]);
-  projectile = createProjectile(ballistaPos.x + 40, ballistaPos.y - 20);
-  Body.setStatic(projectile, true);
-  Composite.add(world, projectile);
-
+  projectile = makeProjectile(BL_X + 45, BL_Y - 25);
+  bodies.push(projectile);
   updateUI();
 }
 
@@ -280,454 +399,260 @@ function updateUI() {
   levelEl.textContent = `Level ${level}`;
 }
 
-function fireBallista(power, angle) {
-  if (projectileFired || shotsLeft <= 0) return;
-  projectileFired = true;
+function fire(power, angle) {
+  if (fired || !projectile || !projectile.alive) return;
+  fired = true;
   shotsLeft--;
-  Body.setStatic(projectile, false);
-  Body.setVelocity(projectile, {
-    x: Math.cos(angle) * power,
-    y: Math.sin(angle) * power
-  });
-  Body.setAngularVelocity(projectile, 0.1);
-  firedProjectiles.push(projectile);
+  projectile.fired = true;
+  projectile.vx = Math.cos(angle) * power;
+  projectile.vy = Math.sin(angle) * power;
   updateUI();
 }
 
 function nextShot() {
-  if (shotsLeft <= 0) {
-    checkLevelEnd();
-    return;
-  }
-  projectileFired = false;
-  settled = false;
+  if (shotsLeft <= 0) { checkEnd(); return; }
+  fired = false;
   settleTimer = 0;
-  projectile = createProjectile(ballistaPos.x + 40, ballistaPos.y - 20);
-  Body.setStatic(projectile, true);
-  Composite.add(world, projectile);
+  projectile = makeProjectile(BL_X + 45, BL_Y - 25);
+  bodies.push(projectile);
 }
 
-function checkLevelEnd() {
-  const alive = enemies.filter(e => e.hp > 0);
-  if (alive.length === 0 && !levelComplete) {
-    levelComplete = true;
+function checkEnd() {
+  const enemies = bodies.filter(b => b.isEnemy && b.alive);
+  if (enemies.length === 0 && !levelDone) {
+    levelDone = true;
+    levelWon = true;
     stars = shotsLeft >= 3 ? 3 : (shotsLeft >= 1 ? 2 : 1);
     score += stars * 500;
     updateUI();
-    setTimeout(() => showOverlay('win'), 1500);
-  } else if (shotsLeft <= 0 && !levelComplete) {
-    levelFailed = true;
-    setTimeout(() => showOverlay('lose'), 2000);
+    setTimeout(showResult, 1200);
+  } else if (shotsLeft <= 0 && !levelDone) {
+    levelDone = true;
+    levelWon = false;
+    setTimeout(showResult, 1500);
   }
 }
 
-function handleAction() {
-  if (levelFailed) retryLevel();
-  else nextLevel();
-}
-
-function showOverlay(type) {
+function showResult() {
   overlay.classList.remove('hidden');
-  if (type === 'win') {
-    document.getElementById('result-stars').textContent = '⭐'.repeat(stars) + '☆'.repeat(3 - stars);
-    document.getElementById('result-text').textContent = `Score: ${score}`;
-    document.getElementById('result-detail').textContent = `Shots remaining: ${shotsLeft}`;
-    document.getElementById('actionBtn').textContent = 'Next Level';
-  } else {
-    document.getElementById('result-stars').textContent = '💀';
-    document.getElementById('result-text').textContent = 'Defeat!';
-    document.getElementById('result-detail').textContent = 'Enemies survived! Try again?';
-    document.getElementById('actionBtn').textContent = 'Retry';
-  }
+  document.getElementById('overlay-title').textContent = levelWon ? '⚔️ Victory!' : '💀 Defeat!';
+  document.getElementById('result-stars').textContent = levelWon ? '⭐'.repeat(stars) + '☆'.repeat(3-stars) : '💀';
+  document.getElementById('result-text').textContent = `Score: ${score}`;
+  document.getElementById('result-detail').textContent = levelWon ? `Shots left: ${shotsLeft}` : 'Enemies survived!';
+  actionBtn.textContent = levelWon ? 'Next Level' : 'Retry';
 }
 
-function nextLevel() {
-  level++;
-  loadLevel(level);
+actionBtn.addEventListener('click', () => {
   overlay.classList.add('hidden');
-}
-
-function retryLevel() {
+  if (levelWon) level++;
   loadLevel(level);
-  overlay.classList.add('hidden');
-}
-
-// Collision handling
-Events.on(engine, 'collisionStart', (event) => {
-  for (const pair of event.pairs) {
-    const { bodyA, bodyB } = pair;
-
-    // Projectile hits block
-    if (bodyA.isProjectile && bodyB.isBlock) handleHit(bodyB, bodyA);
-    else if (bodyB.isProjectile && bodyA.isBlock) handleHit(bodyA, bodyB);
-
-    // Projectile hits enemy
-    if (bodyA.isProjectile && bodyB.isEnemy) handleEnemyHit(bodyB);
-    else if (bodyB.isProjectile && bodyA.isEnemy) handleEnemyHit(bodyA);
-
-    // Block falls on enemy
-    if (bodyA.isBlock && bodyB.isEnemy) {
-      const speed = Vector.magnitude(Vector.sub(bodyA.velocity, bodyB.velocity));
-      if (speed > 2) handleEnemyHit(bodyB);
-    }
-    if (bodyB.isBlock && bodyA.isEnemy) {
-      const speed = Vector.magnitude(Vector.sub(bodyB.velocity, bodyA.velocity));
-      if (speed > 2) handleEnemyHit(bodyA);
-    }
-
-    // Block hits block
-    if (bodyA.isBlock && bodyB.isBlock) {
-      const speed = Vector.magnitude(Vector.sub(bodyA.velocity, bodyB.velocity));
-      if (speed > 3) {
-        handleHit(bodyA, bodyB);
-        handleHit(bodyB, bodyA);
-      }
-    }
-  }
 });
 
-function handleHit(block, hitter) {
-  if (block.hp <= 0) return;
-  const speed = hitter.isProjectile
-    ? Vector.magnitude(hitter.velocity)
-    : Vector.magnitude(Vector.sub(block.velocity, hitter.velocity));
-  const dmg = hitter.isProjectile ? 2 : 1;
-  if (speed > 2) {
-    block.hp -= dmg;
-    score += 50;
-    updateUI();
-    if (block.hp <= 0) {
-      // Destroy block with particles
-      createDebris(block.position.x, block.position.y, block.breakColor || block.color, 5);
-      Composite.remove(world, block);
-    }
-  }
-}
-
-function handleEnemyHit(enemy) {
-  if (enemy.hp <= 0) return;
-  enemy.hp--;
-  score += 200;
-  updateUI();
-  createDebris(enemy.position.x, enemy.position.y, '#cc3333', 8);
-  Composite.remove(world, enemy);
-  checkLevelEnd();
-}
-
-// Particles
-let particles = [];
-function createDebris(x, y, color, count) {
-  for (let i = 0; i < count; i++) {
-    particles.push({
-      x, y,
-      vx: (Math.random() - 0.5) * 8,
-      vy: -Math.random() * 6 - 2,
-      size: 2 + Math.random() * 5,
-      color,
-      life: 1.0,
-      rotation: Math.random() * Math.PI * 2
-    });
-  }
-}
-
-function updateParticles() {
-  for (let i = particles.length - 1; i >= 0; i--) {
-    const p = particles[i];
-    p.x += p.vx;
-    p.y += p.vy;
-    p.vy += 0.3;
-    p.life -= 0.02;
-    p.rotation += 0.1;
-    if (p.life <= 0) particles.splice(i, 1);
-  }
-}
-
 // Drawing
-function drawBackground() {
-  // Sky gradient
-  const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
-  grad.addColorStop(0, '#87CEEB');
-  grad.addColorStop(0.5, '#B0E0E6');
-  grad.addColorStop(1, '#E0F0E0');
-  ctx.fillStyle = grad;
+function drawBg() {
+  const g = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  g.addColorStop(0, '#87CEEB');
+  g.addColorStop(0.6, '#B0E0E6');
+  g.addColorStop(1, '#d4e8d0');
+  ctx.fillStyle = g;
   ctx.fillRect(0, 0, W, GROUND_Y);
 
   // Clouds
-  ctx.fillStyle = 'rgba(255,255,255,0.6)';
-  drawCloud(W * 0.2, 60, 40);
-  drawCloud(W * 0.5, 90, 30);
-  drawCloud(W * 0.8, 50, 35);
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  [[W*0.15,55,35],[W*0.45,80,25],[W*0.75,45,30]].forEach(([cx,cy,s]) => {
+    ctx.beginPath();
+    ctx.arc(cx,cy,s,0,Math.PI*2);
+    ctx.arc(cx+s*0.7,cy-s*0.2,s*0.6,0,Math.PI*2);
+    ctx.arc(cx+s*1.3,cy,s*0.7,0,Math.PI*2);
+    ctx.fill();
+  });
 
   // Ground
-  const gGrad = ctx.createLinearGradient(0, GROUND_Y, 0, H);
-  gGrad.addColorStop(0, '#5a8f3f');
-  gGrad.addColorStop(0.3, '#4a7c3f');
-  gGrad.addColorStop(1, '#3a5c2f');
-  ctx.fillStyle = gGrad;
+  const gg = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+  gg.addColorStop(0, '#5a8f3f');
+  gg.addColorStop(1, '#3a5c2f');
+  ctx.fillStyle = gg;
   ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
-
-  // Grass line
-  ctx.strokeStyle = '#6aaf4f';
-  ctx.lineWidth = 3;
-  ctx.beginPath();
-  ctx.moveTo(0, GROUND_Y);
-  ctx.lineTo(W, GROUND_Y);
-  ctx.stroke();
 }
 
-function drawCloud(x, y, size) {
-  ctx.beginPath();
-  ctx.arc(x, y, size, 0, Math.PI * 2);
-  ctx.arc(x + size * 0.8, y - size * 0.3, size * 0.7, 0, Math.PI * 2);
-  ctx.arc(x + size * 1.5, y, size * 0.8, 0, Math.PI * 2);
-  ctx.arc(x + size * 0.6, y + size * 0.2, size * 0.5, 0, Math.PI * 2);
-  ctx.fill();
+function drawBody(b) {
+  if (!b.alive) return;
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(b.angle);
+
+  if (b.type === 'rect') {
+    const hpRatio = b.hp / b.maxHp;
+    const colors = { wood: '#B8860B', stone: '#808080', glass: '#87CEEB' };
+    ctx.fillStyle = colors[b.mat] || '#888';
+    ctx.fillRect(-b.w/2, -b.h/2, b.w, b.h);
+
+    // Texture
+    if (b.mat === 'wood') {
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+      ctx.lineWidth = 1;
+      for (let i = -b.w/2+6; i < b.w/2; i += 9) {
+        ctx.beginPath(); ctx.moveTo(i,-b.h/2); ctx.lineTo(i+2,b.h/2); ctx.stroke();
+      }
+    } else if (b.mat === 'stone') {
+      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(-b.w/2,-b.h/2,b.w,b.h);
+    } else {
+      ctx.globalAlpha = 0.3;
+      ctx.fillStyle = '#fff';
+      ctx.fillRect(-b.w/2+3,-b.h/2+3,b.w*0.25,b.h*0.25);
+      ctx.globalAlpha = 1;
+    }
+
+    // Damage cracks
+    if (hpRatio < 1) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(-b.w*0.2, -b.h*0.3);
+      ctx.lineTo(b.w*0.1, 0);
+      ctx.lineTo(b.w*0.15, b.h*0.25);
+      ctx.stroke();
+    }
+
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-b.w/2,-b.h/2,b.w,b.h);
+
+  } else if (b.type === 'circle' && b.isEnemy) {
+    // Enemy face
+    ctx.fillStyle = '#cc3333';
+    ctx.beginPath(); ctx.arc(0, 0, b.r, 0, Math.PI*2); ctx.fill();
+    const eg = ctx.createRadialGradient(-3,-3,1,0,0,b.r);
+    eg.addColorStop(0, 'rgba(255,100,100,0.4)');
+    eg.addColorStop(1, 'rgba(0,0,0,0.15)');
+    ctx.fillStyle = eg; ctx.fill();
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.beginPath(); ctx.arc(-5,-3,4,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5,-3,4,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath(); ctx.arc(-5,-3,2,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(5,-3,2,0,Math.PI*2); ctx.fill();
+    // Eyebrows
+    ctx.strokeStyle = '#000'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(-9,-8); ctx.lineTo(-2,-6); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(9,-8); ctx.lineTo(2,-6); ctx.stroke();
+
+  } else if (b.type === 'projectile') {
+    ctx.fillStyle = '#444';
+    ctx.beginPath(); ctx.arc(0,0,b.r,0,Math.PI*2); ctx.fill();
+    const pg = ctx.createRadialGradient(-3,-3,1,0,0,b.r);
+    pg.addColorStop(0,'rgba(255,255,255,0.3)');
+    pg.addColorStop(1,'rgba(0,0,0,0.15)');
+    ctx.fillStyle = pg; ctx.fill();
+    ctx.strokeStyle = '#333'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(0,0,b.r,0,Math.PI*2); ctx.stroke();
+  }
+
+  ctx.restore();
 }
 
 function drawBallista() {
-  const bx = ballistaPos.x;
-  const by = ballistaPos.y;
+  const bx = BL_X, by = BL_Y;
 
-  // Base/platform
+  // Base
   ctx.fillStyle = '#5C3317';
-  ctx.fillRect(bx - 35, by - 5, 70, 15);
+  ctx.fillRect(bx - 30, by - 5, 60, 12);
   ctx.fillStyle = '#4A2810';
-  ctx.fillRect(bx - 40, by + 8, 80, 10);
+  ctx.fillRect(bx - 35, by + 5, 70, 8);
 
   // Wheels
   ctx.fillStyle = '#3a2010';
-  ctx.strokeStyle = '#5C3317';
-  ctx.lineWidth = 3;
-  ctx.beginPath(); ctx.arc(bx - 25, by + 15, 10, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-  ctx.beginPath(); ctx.arc(bx + 25, by + 15, 10, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.strokeStyle = '#5C3317'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(bx-22, by+12, 8, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(bx+22, by+12, 8, 0, Math.PI*2); ctx.fill(); ctx.stroke();
 
   // Frame
   ctx.fillStyle = '#6B3A1F';
-  ctx.fillRect(bx - 5, by - 40, 10, 40);
+  ctx.fillRect(bx-4, by-35, 8, 35);
 
-  // Arms (aim direction)
-  let armAngle = -Math.PI / 4;
-  if (aiming && aimStart && aimCurrent) {
-    const dx = aimStart.x - aimCurrent.x;
-    const dy = aimStart.y - aimCurrent.y;
+  // Arms
+  let armAngle = -Math.PI/4;
+  if (aiming) {
+    const dx = BL_X + 45 - aimX;
+    const dy = (BL_Y - 25) - aimY;
     armAngle = Math.atan2(dy, dx);
-    if (armAngle > 0) armAngle = 0;
-    if (armAngle < -Math.PI / 2) armAngle = -Math.PI / 2;
+    if (armAngle > -0.1) armAngle = -0.1;
+    if (armAngle < -Math.PI/2) armAngle = -Math.PI/2;
   }
 
   ctx.save();
-  ctx.translate(bx, by - 35);
+  ctx.translate(bx, by - 32);
   ctx.rotate(armAngle);
 
-  // Left arm
+  // Arms
   ctx.fillStyle = '#5C3317';
-  ctx.save();
-  ctx.rotate(-0.1);
-  ctx.fillRect(0, -4, 55, 8);
-  ctx.restore();
-
-  // Right arm
-  ctx.save();
-  ctx.rotate(0.1);
-  ctx.fillRect(0, -4, 55, 8);
-  ctx.restore();
+  ctx.save(); ctx.rotate(-0.08);
+  ctx.fillRect(0,-3.5,50,7); ctx.restore();
+  ctx.save(); ctx.rotate(0.08);
+  ctx.fillRect(0,-3.5,50,7); ctx.restore();
 
   // Bowstring
-  ctx.strokeStyle = '#8B7355';
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#8B7355'; ctx.lineWidth = 2;
   ctx.beginPath();
-  const strLen = 50;
-  ctx.moveTo(Math.cos(-0.1) * strLen, Math.sin(-0.1) * strLen);
-  if (aiming && aimStart && aimCurrent) {
-    const pullDist = Math.min(Math.hypot(aimStart.x - aimCurrent.x, aimStart.y - aimCurrent.y), 80);
-    ctx.lineTo(0, pullDist * 0.3);
+  const sl = 45;
+  ctx.moveTo(Math.cos(-0.08)*sl, Math.sin(-0.08)*sl);
+  if (aiming) {
+    const pull = Math.min(Math.hypot(BL_X+45-aimX, BL_Y-25-aimY), 80);
+    ctx.lineTo(0, pull*0.3);
   } else {
-    ctx.lineTo(0, 5);
+    ctx.lineTo(0, 4);
   }
-  ctx.lineTo(Math.cos(0.1) * strLen, Math.sin(0.1) * strLen);
+  ctx.lineTo(Math.cos(0.08)*sl, Math.sin(0.08)*sl);
   ctx.stroke();
 
   ctx.restore();
 
-  // Draw projectile on ballista if not fired
-  if (projectile && !projectileFired) {
-    const px = bx + Math.cos(armAngle) * 45;
-    const py = (by - 35) + Math.sin(armAngle) * 45;
-    drawProjectileSprite(px, py);
+  // Draw loaded projectile
+  if (projectile && !projectile.fired) {
+    const px = bx + Math.cos(armAngle) * 42;
+    const py = (by - 32) + Math.sin(armAngle) * 42;
+    ctx.fillStyle = '#444';
+    ctx.beginPath(); ctx.arc(px, py, projectile.r, 0, Math.PI*2); ctx.fill();
+    const g = ctx.createRadialGradient(px-2,py-2,1,px,py,projectile.r);
+    g.addColorStop(0,'rgba(255,255,255,0.3)');
+    g.addColorStop(1,'rgba(0,0,0,0.1)');
+    ctx.fillStyle = g; ctx.fill();
   }
 }
 
-function drawProjectileSprite(x, y) {
-  // Boulder/cannonball
-  ctx.fillStyle = '#444';
-  ctx.beginPath();
-  ctx.arc(x, y, PROJECTILE_RADIUS, 0, Math.PI * 2);
-  ctx.fill();
-  const grad = ctx.createRadialGradient(x - 3, y - 3, 1, x, y, PROJECTILE_RADIUS);
-  grad.addColorStop(0, 'rgba(255,255,255,0.3)');
-  grad.addColorStop(1, 'rgba(0,0,0,0.2)');
-  ctx.fillStyle = grad;
-  ctx.fill();
-  ctx.strokeStyle = '#333';
-  ctx.lineWidth = 1;
-  ctx.stroke();
-}
-
-function drawBlock(b) {
-  const verts = b.vertices;
-  const hpRatio = b.hp / b.maxHp;
-
-  ctx.save();
-  ctx.translate(b.position.x, b.position.y);
-  ctx.rotate(b.angle);
-
-  // Main block
-  ctx.fillStyle = b.color;
-  if (b.material === 'wood') {
-    // Wood texture lines
-    ctx.fillRect(-b.width / 2, -b.height / 2, b.width, b.height);
-    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-    ctx.lineWidth = 1;
-    for (let i = -b.width / 2 + 5; i < b.width / 2; i += 8) {
-      ctx.beginPath();
-      ctx.moveTo(i, -b.height / 2);
-      ctx.lineTo(i + 2, b.height / 2);
-      ctx.stroke();
-    }
-  } else if (b.material === 'stone') {
-    ctx.fillRect(-b.width / 2, -b.height / 2, b.width, b.height);
-    ctx.strokeStyle = 'rgba(0,0,0,0.2)';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(-b.width / 2, -b.height / 2, b.width, b.height);
-    // Stone texture dots
-    ctx.fillStyle = 'rgba(0,0,0,0.1)';
-    for (let i = 0; i < 3; i++) {
-      const rx = (Math.random() - 0.5) * b.width * 0.6;
-      const ry = (Math.random() - 0.5) * b.height * 0.6;
-      ctx.fillRect(rx, ry, 3, 3);
-    }
-  } else if (b.material === 'glass') {
-    ctx.globalAlpha = 0.7;
-    ctx.fillStyle = b.color;
-    ctx.fillRect(-b.width / 2, -b.height / 2, b.width, b.height);
-    ctx.globalAlpha = 0.3;
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(-b.width / 2 + 2, -b.height / 2 + 2, b.width * 0.3, b.height * 0.3);
-    ctx.globalAlpha = 1;
-  }
-
-  // Damage cracks
-  if (hpRatio < 1) {
-    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.moveTo(-b.width * 0.2, -b.height * 0.3);
-    ctx.lineTo(b.width * 0.1, 0);
-    ctx.lineTo(b.width * 0.2, b.height * 0.3);
-    ctx.stroke();
-    if (hpRatio < 0.5) {
-      ctx.beginPath();
-      ctx.moveTo(b.width * 0.1, 0);
-      ctx.lineTo(-b.width * 0.1, b.height * 0.2);
-      ctx.stroke();
-    }
-  }
-
-  // Border
-  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(-b.width / 2, -b.height / 2, b.width, b.height);
-
-  ctx.restore();
-}
-
-function drawEnemy(e) {
-  const x = e.position.x;
-  const y = e.position.y;
-  const r = e.radius;
-
-  // Body (red circle with face)
-  ctx.fillStyle = '#cc3333';
-  ctx.beginPath();
-  ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.fill();
-
-  // Highlight
-  const grad = ctx.createRadialGradient(x - 3, y - 3, 1, x, y, r);
-  grad.addColorStop(0, 'rgba(255,100,100,0.5)');
-  grad.addColorStop(1, 'rgba(0,0,0,0.2)');
-  ctx.fillStyle = grad;
-  ctx.fill();
-
-  // Eyes
-  ctx.fillStyle = '#fff';
-  ctx.beginPath(); ctx.arc(x - 5, y - 3, 4, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + 5, y - 3, 4, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = '#000';
-  ctx.beginPath(); ctx.arc(x - 5, y - 3, 2, 0, Math.PI * 2); ctx.fill();
-  ctx.beginPath(); ctx.arc(x + 5, y - 3, 2, 0, Math.PI * 2); ctx.fill();
-
-  // Angry eyebrows
-  ctx.strokeStyle = '#000';
-  ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(x - 9, y - 8); ctx.lineTo(x - 2, y - 6); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(x + 9, y - 8); ctx.lineTo(x + 2, y - 6); ctx.stroke();
-
-  // Mouth
-  ctx.strokeStyle = '#000';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  ctx.arc(x, y + 5, 4, 0, Math.PI);
-  ctx.stroke();
-}
-
-function drawAimGuide() {
-  if (!aiming || !aimStart || !aimCurrent || projectileFired) return;
-
-  const dx = aimStart.x - aimCurrent.x;
-  const dy = aimStart.y - aimCurrent.y;
-  const power = Math.min(Math.hypot(dx, dy) * BALLISTA_POWER, 20);
+function drawTrajectory() {
+  if (!aiming || fired) return;
+  const dx = BL_X + 45 - aimX;
+  const dy = (BL_Y - 25) - aimY;
+  const power = Math.min(Math.hypot(dx,dy) * 0.16, 18);
   const angle = Math.atan2(dy, dx);
+  if (angle > -0.1) return;
 
-  if (angle > 0) return; // Don't aim down
-
-  // Trajectory preview
   ctx.save();
-  ctx.setLineDash([4, 6]);
-  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.setLineDash([4,6]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
   ctx.lineWidth = 2;
   ctx.beginPath();
-
-  let sx = ballistaPos.x + 40;
-  let sy = ballistaPos.y - 20;
-  let vx = Math.cos(angle) * power;
-  let vy = Math.sin(angle) * power;
-
+  let sx = BL_X+45, sy = BL_Y-25;
+  let vx = Math.cos(angle)*power, vy = Math.sin(angle)*power;
   ctx.moveTo(sx, sy);
-  for (let i = 0; i < 40; i++) {
-    sx += vx;
-    sy += vy;
-    vy += 0.5; // gravity
-    if (sy > GROUND_Y) break;
+  for (let i = 0; i < 50; i++) {
+    sx += vx; sy += vy; vy += GRAVITY;
+    if (sy > GROUND_Y || sx > W) break;
     ctx.lineTo(sx, sy);
   }
   ctx.stroke();
   ctx.restore();
 
-  // Power indicator
-  const powerPct = Math.min(Math.hypot(dx, dy) / 80, 1);
-  const barW = 60;
-  const barH = 8;
-  const barX = ballistaPos.x - barW / 2;
-  const barY = ballistaPos.y + 30;
+  // Power bar
+  const pwr = Math.min(Math.hypot(dx,dy)/80, 1);
   ctx.fillStyle = 'rgba(0,0,0,0.4)';
-  ctx.fillRect(barX, barY, barW, barH);
-  const color = powerPct < 0.5 ? '#4CAF50' : (powerPct < 0.8 ? '#FFC107' : '#F44336');
-  ctx.fillStyle = color;
-  ctx.fillRect(barX, barY, barW * powerPct, barH);
-  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(barX, barY, barW, barH);
+  ctx.fillRect(BL_X-25, BL_Y+25, 50, 6);
+  ctx.fillStyle = pwr < 0.5 ? '#4CAF50' : (pwr < 0.8 ? '#FFC107' : '#F44336');
+  ctx.fillRect(BL_X-25, BL_Y+25, 50*pwr, 6);
 }
 
 function drawParticles() {
@@ -735,145 +660,89 @@ function drawParticles() {
     ctx.save();
     ctx.globalAlpha = p.life;
     ctx.translate(p.x, p.y);
-    ctx.rotate(p.rotation);
+    ctx.rotate(p.rot);
     ctx.fillStyle = p.color;
-    ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+    ctx.fillRect(-p.size/2,-p.size/2,p.size,p.size);
     ctx.restore();
   }
 }
 
-function draw() {
-  ctx.clearRect(0, 0, W, H);
-  drawBackground();
-
-  // Draw blocks
-  for (const b of blocks) {
-    if (b.hp > 0) drawBlock(b);
-  }
-
-  // Draw enemies
-  for (const e of enemies) {
-    if (e.hp > 0) drawEnemy(e);
-  }
-
-  // Draw fired projectiles
-  for (const p of firedProjectiles) {
-    if (p.position.y < H + 50) {
-      drawProjectileSprite(p.position.x, p.position.y);
-    }
-  }
-
-  drawParticles();
-  drawBallista();
-  drawAimGuide();
-}
-
-function checkSettled() {
-  if (!projectileFired || settled || levelComplete || levelFailed) return;
-
-  let allSlow = true;
-  for (const body of Composite.allBodies(world)) {
-    if (body.isStatic) continue;
-    const speed = Vector.magnitude(body.velocity);
-    if (speed > SETTLE_THRESHOLD) { allSlow = false; break; }
-  }
-
-  if (allSlow) {
-    settleTimer++;
-    if (settleTimer > 60) {
-      settled = true;
-      setTimeout(() => nextShot(), 800);
-    }
-  } else {
-    settleTimer = 0;
+function updateParticles() {
+  for (let i = particles.length-1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.vy += 0.3;
+    p.life -= 0.02; p.rot += 0.1;
+    if (p.life <= 0) particles.splice(i, 1);
   }
 }
 
-// Input handling
-function getPos(e) {
-  if (e.touches) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
-  return { x: e.clientX, y: e.clientY };
-}
-
-function handleDown(e) {
-  e.preventDefault();
-  if (projectileFired || levelComplete || levelFailed) return;
-  if (!overlay.classList.contains('hidden')) return;
-  const pos = getPos(e);
-  // Only start aiming if near the ballista area
-  if (pos.x < W * 0.3 && pos.y > GROUND_Y - 100) {
+// Input
+function handleDown(x, y) {
+  if (fired || levelDone) return;
+  if (x < W * 0.35 && y > GROUND_Y - 120) {
     aiming = true;
-    aimStart = { x: ballistaPos.x + 40, y: ballistaPos.y - 20 };
-    aimCurrent = pos;
+    aimX = x; aimY = y;
   }
 }
-
-function handleMove(e) {
-  e.preventDefault();
-  if (aiming) {
-    aimCurrent = getPos(e);
-  }
+function handleMove(x, y) {
+  if (aiming) { aimX = x; aimY = y; }
 }
-
-function handleUp(e) {
-  e.preventDefault();
-  if (aiming && aimStart && aimCurrent && !projectileFired) {
-    const dx = aimStart.x - aimCurrent.x;
-    const dy = aimStart.y - aimCurrent.y;
-    const power = Math.min(Math.hypot(dx, dy) * BALLISTA_POWER, 20);
+function handleUp() {
+  if (aiming && !fired) {
+    const dx = BL_X + 45 - aimX;
+    const dy = (BL_Y - 25) - aimY;
+    const power = Math.min(Math.hypot(dx,dy) * 0.16, 18);
     const angle = Math.atan2(dy, dx);
-    if (power > 1 && angle < 0) {
-      fireBallista(power, angle);
-    }
+    if (power > 1.5 && angle < -0.1) fire(power, angle);
   }
   aiming = false;
-  aimStart = null;
-  aimCurrent = null;
 }
 
-canvas.addEventListener('mousedown', handleDown);
-canvas.addEventListener('mousemove', handleMove);
+canvas.addEventListener('mousedown', e => handleDown(e.clientX, e.clientY));
+canvas.addEventListener('mousemove', e => handleMove(e.clientX, e.clientY));
 canvas.addEventListener('mouseup', handleUp);
-canvas.addEventListener('touchstart', handleDown, { passive: false });
-canvas.addEventListener('touchmove', handleMove, { passive: false });
-canvas.addEventListener('touchend', handleUp, { passive: false });
+canvas.addEventListener('touchstart', e => { e.preventDefault(); handleDown(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
+canvas.addEventListener('touchmove', e => { e.preventDefault(); handleMove(e.touches[0].clientX, e.touches[0].clientY); }, {passive:false});
+canvas.addEventListener('touchend', e => { e.preventDefault(); handleUp(); }, {passive:false});
 
 // Game loop
-let lastTime = 0;
-function gameLoop(timestamp) {
-  const delta = timestamp - lastTime;
-  lastTime = timestamp;
+function gameLoop() {
+  if (!levelDone) {
+    physicsStep();
 
-  if (!levelComplete && !levelFailed) {
-    Engine.update(engine, Math.min(delta, 20));
-    checkSettled();
+    if (fired && projectile && !projectile.alive) {
+      settleTimer++;
+      if (settleTimer > 30) nextShot();
+    } else if (fired && allSettled()) {
+      settleTimer++;
+      if (settleTimer > 50) {
+        checkEnd();
+        if (!levelDone) nextShot();
+      }
+    } else {
+      settleTimer = 0;
+    }
   }
 
   updateParticles();
-  draw();
+
+  // Draw
+  ctx.clearRect(0, 0, W, H);
+  drawBg();
+  for (const b of bodies) drawBody(b);
+  drawParticles();
+  drawBallista();
+  drawTrajectory();
+
   requestAnimationFrame(gameLoop);
 }
 
-// Start immediately
-score = 0;
-level = 1;
-loadLevel(level);
-
-startBtn.addEventListener('click', (e) => { e.stopPropagation(); handleAction(); });
-startBtn.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); handleAction(); });
-
-window.addEventListener('resize', () => {
-  resize();
-  if (engine) {
-    Body.setPosition(groundBody, { x: W / 2, y: GROUND_Y + 25 });
-    Body.setPosition(wallBodies[1], { x: -25, y: H / 2 });
-    Body.setPosition(wallBodies[2], { x: W + 25, y: H / 2 });
-  }
-});
-
+// Init
 resize();
-initPhysics();
-requestAnimationFrame(gameLoop);
+window.addEventListener('resize', resize);
+score = 0; level = 1;
+loadLevel(1);
+gameLoop();
 </script>
 </body>
 </html>
