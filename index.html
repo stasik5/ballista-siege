@@ -82,6 +82,7 @@ let settleTimer = 0;
 let levelDone = false, levelWon = false;
 let aiming = false, aimX = 0, aimY = 0;
 let stars = 0;
+let graceFrames = 0; // no damage during settling
 
 const GRAVITY = 0.4;
 const DAMPING = 0.98;
@@ -219,7 +220,7 @@ function physicsStep() {
     if (bottom > GROUND_Y) {
       const penetration = bottom - GROUND_Y;
       a.y -= penetration;
-      if (Math.abs(a.vy) > 2) {
+      if (Math.abs(a.vy) > 2 && graceFrames <= 0) {
         a.hp = (a.hp || 1) - Math.floor(Math.abs(a.vy) / 6);
         if (a.hp <= 0 && a.type !== 'projectile') destroyBody(a);
       }
@@ -262,8 +263,8 @@ function physicsStep() {
         const relSpeed = Math.sqrt(relVx * relVx + relVy * relVy);
         applyImpulse(a, b, col.nx, col.ny, relSpeed * 0.5);
 
-        // Damage
-        if (relSpeed > 3) {
+        // Damage (no damage during grace period)
+        if (relSpeed > 3 && graceFrames <= 0) {
           const dmg = relSpeed > 8 ? 3 : (relSpeed > 5 ? 2 : 1);
           if (a.type !== 'projectile' && a !== b) {
             a.hp -= dmg;
@@ -390,6 +391,7 @@ function loadLevel(n) {
 
   projectile = makeProjectile(BL_X + 45, BL_Y - 25);
   bodies.push(projectile);
+  graceFrames = 90; // 1.5s grace period
   updateUI();
 }
 
@@ -708,6 +710,7 @@ canvas.addEventListener('touchend', e => { e.preventDefault(); handleUp(); }, {p
 // Game loop
 function gameLoop() {
   if (!levelDone) {
+    if (graceFrames > 0) graceFrames--;
     physicsStep();
 
     if (fired && projectile && !projectile.alive) {
