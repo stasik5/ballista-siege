@@ -28,6 +28,7 @@ canvas { display: block; }
   background: rgba(0,0,0,0.75);
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   z-index: 10;
+  pointer-events: all;
 }
 #overlay.hidden { display: none; pointer-events: none; }
 #overlay h1 { color: #e8a838; font-size: 32px; margin-bottom: 8px; text-shadow: 0 3px 6px rgba(0,0,0,0.5); }
@@ -794,6 +795,7 @@ function getPos(e) {
 function handleDown(e) {
   e.preventDefault();
   if (projectileFired || levelComplete || levelFailed) return;
+  if (!overlay.classList.contains('hidden')) return;
   const pos = getPos(e);
   // Only start aiming if near the ballista area
   if (pos.x < W * 0.3 && pos.y > GROUND_Y - 100) {
@@ -856,8 +858,8 @@ function startGame() {
   loadLevel(level);
 }
 
-startBtn.addEventListener('click', startGame);
-startBtn.addEventListener('touchend', (e) => { e.preventDefault(); startGame(); });
+startBtn.addEventListener('click', (e) => { e.stopPropagation(); startGame(); });
+startBtn.addEventListener('touchend', (e) => { e.preventDefault(); e.stopPropagation(); startGame(); });
 
 window.addEventListener('resize', () => {
   resize();
