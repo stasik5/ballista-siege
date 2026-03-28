@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, maximum-scale=1.0">
+<title>Ballista Siege</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: #2c1810;
+  overflow: hidden;
+  touch-action: none;
+  font-family: 'Georgia', serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+canvas { display: block; }
+#ui {
+  position: absolute; top: 0; left: 0; width: 100%; pointer-events: none;
+  display: flex; justify-content: space-between; padding: 10px 15px;
+}
+#score { color: #f4e4c1; font-size: 18px; font-weight: bold; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }
+#shots { color: #f4e4c1; font-size: 18px; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }
+#level-info { color: #f4e4c1; font-size: 16px; text-shadow: 0 2px 4px rgba(0,0,0,0.8); }
+#overlay {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  background: rgba(0,0,0,0.75);
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  z-index: 10;
+}
+#overlay.hidden { display: none; pointer-events: none; }
+#overlay h1 { color: #e8a838; font-size: 32px; margin-bottom: 8px; text-shadow: 0 3px 6px rgba(0,0,0,0.5); }
+#overlay h2 { color: #f4e4c1; font-size: 20px; margin-bottom: 15px; }
+#overlay p { color: #ccc; font-size: 14px; margin-bottom: 20px; text-align: center; padding: 0 30px; max-width: 300px; }
+#overlay .stars { font-size: 40px; margin-bottom: 15px; }
+.btn {
+  background: #8b4513; color: #f4e4c1; border: 2px solid #e8a838;
+  padding: 12px 36px; font-size: 17px; border-radius: 8px;
+  cursor: pointer; font-weight: bold; font-family: 'Georgia', serif;
+  transition: transform 0.1s;
+}
+.btn:active { transform: scale(0.95); background: #a0522d; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="ui">
+  <div id="score">Score: 0</div>
+  <div id="level-info">Level 1</div>
+  <div id="shots">🏹 5</div>
+</div>
+<div id="overlay">
+  <h1>⚔️ Ballista Siege</h1>
+  <p>Drag back on the ballista to aim and fire! Destroy all structures and enemies to win.</p>
+  <button class="btn" id="startBtn">Begin Siege</button>
+</div>
+
+<script>
+const { Engine, Render, Runner, Bodies, Body, Composite, Events, Mouse, MouseConstraint, Vector, Constraint, World } = Matter;
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const scoreEl = document.getElementById('score');
+const shotsEl = document.getElementById('shots');
+const levelEl = document.getElementById('level-info');
+const overlay = document.getElementById('overlay');
+const startBtn = document.getElementById('startBtn');
+
+let W, H, GROUND_Y;
+let engine, world;
+let score = 0;
+let shotsLeft = 5;
+let level = 1;
+let aiming = false;
+let aimStart = null;
+let aimCurrent = null;
+let ballistaPos = { x: 0, y: 0 };
+let projectile = null;
+let projectileFired = false;
+let firedProjectiles = [];
+let enemies = [];
+let blocks = [];
+let settled = false;
+let settleTimer = 0;
+let levelComplete = false;
+let levelFailed = false;
+let stars = 0;
+let groundBody;
+let wallBodies = [];
+
+// Physics constants
+const BALLISTA_POWER = 0.045;
+const PROJECTILE_RADIUS = 12;
+const SETTLE_THRESHOLD = 0.3;
+
+function resize() {
+  W = canvas.width = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  GROUND_Y = H - 50;
+  ballistaPos = { x: 80, y: GROUND_Y - 30 };
+}
+
+function initPhysics() {
+  engine = Engine.create({ gravity: { x: 0, y: 1.5 } });
+  world = engine.world;
+
+  // Ground
+  groundBody = Bodies.rectangle(W / 2, GROUND_Y + 25, W * 2, 50, {
+    isStatic: true, friction: 0.9, restitution: 0.1,
+    render: { fillStyle: '#4a7c3f' }
+  });
+
+  // Walls (invisible)
+  const wallL = Bodies.rectangle(-25, H / 2, 50, H * 2, { isStatic: true });
+  const wallR = Bodies.rectangle(W + 25, H / 2, 50, H * 2, { isStatic: true });
+
+  Composite.add(world, [groundBody, wallL, wallR]);
+  wallBodies = [groundBody, wallL, wallR];
+}
+
+function createProjectile(x, y) {
+  const p = Bodies.circle(x, y, PROJECTILE_RADIUS, {
+    density: 0.004,
+    friction: 0.3,
+    restitution: 0.4,
+    render: { fillStyle: '#333' }
+  });
+  p.isProjectile = true;
+  p.damage = 2;
+  return p;
+}
+
+function createBlock(x, y, w, h, material) {
+  const props = {
+    friction: 0.8,
+    restitution: 0.05,
+  };
+  if (material === 'wood') {
+    props.density = 0.003;
+    props.hp = 2;
+    props.color = '#8B6914';
+    props.breakColor = '#6B4F10';
+  } else if (material === 'stone') {
+    props.density = 0.006;
+    props.hp = 4;
+    props.color = '#808080';
+    props.breakColor = '#606060';
+  } else if (material === 'glass') {
+    props.density = 0.001;
+    props.hp = 1;
+    props.color = '#87CEEB';
+    props.breakColor = '#5BA3C9';
+  }
+  const b = Bodies.rectangle(x, y, w, h, props);
+  b.isBlock = true;
+  b.material = material;
+  b.hp = props.hp;
+  b.maxHp = props.hp;
+  b.color = props.color;
+  b.breakColor = props.breakColor;
+  b.width = w;
+  b.height = h;
+  return b;
+}
+
+function createEnemy(x, y) {
+  const e = Bodies.circle(x, y, 15, {
+    density: 0.001,
+    friction: 0.5,
+    restitution: 0.2,
+    render: { fillStyle: '#cc3333' }
+  });
+  e.isEnemy = true;
+  e.hp = 1;
+  e.radius = 15;
+  return e;
+}
+
+function loadLevel(n) {
+  // Clear old objects
+  Composite.clear(world, false);
+  Composite.add(world, wallBodies);
+  firedProjectiles = [];
+  enemies = [];
+  blocks = [];
+  projectile = null;
+  projectileFired = false;
+  settled = false;
+  settleTimer = 0;
+  levelComplete = false;
+  levelFailed = false;
+  stars = 0;
+
+  const bx = W * 0.65; // base x for structures
+
+  if (n === 1) {
+    shotsLeft = 5;
+    // Simple tower
+    blocks.push(createBlock(bx, GROUND_Y - 20, 80, 40, 'wood'));
+    blocks.push(createBlock(bx - 20, GROUND_Y - 60, 20, 40, 'wood'));
+    blocks.push(createBlock(bx + 20, GROUND_Y - 60, 20, 40, 'wood'));
+    blocks.push(createBlock(bx, GROUND_Y - 90, 80, 20, 'wood'));
+    enemies.push(createEnemy(bx, GROUND_Y - 115));
+  } else if (n === 2) {
+    shotsLeft = 5;
+    // Two towers with bridge
+    blocks.push(createBlock(bx - 40, GROUND_Y - 20, 20, 40, 'stone'));
+    blocks.push(createBlock(bx + 40, GROUND_Y - 20, 20, 40, 'stone'));
+    blocks.push(createBlock(bx, GROUND_Y - 50, 120, 20, 'wood'));
+    blocks.push(createBlock(bx - 25, GROUND_Y - 75, 20, 30, 'wood'));
+    blocks.push(createBlock(bx + 25, GROUND_Y - 75, 20, 30, 'wood'));
+    blocks.push(createBlock(bx, GROUND_Y - 100, 80, 20, 'wood'));
+    enemies.push(createEnemy(bx - 20, GROUND_Y - 120));
+    enemies.push(createEnemy(bx + 20, GROUND_Y - 120));
+  } else if (n === 3) {
+    shotsLeft = 6;
+    // Fortress
+    blocks.push(createBlock(bx, GROUND_Y - 20, 160, 40, 'stone'));
+    blocks.push(createBlock(bx - 60, GROUND_Y - 55, 20, 50, 'stone'));
+    blocks.push(createBlock(bx - 20, GROUND_Y - 55, 20, 50, 'wood'));
+    blocks.push(createBlock(bx + 20, GROUND_Y - 55, 20, 50, 'wood'));
+    blocks.push(createBlock(bx + 60, GROUND_Y - 55, 20, 50, 'stone'));
+    blocks.push(createBlock(bx, GROUND_Y - 85, 160, 20, 'stone'));
+    blocks.push(createBlock(bx - 30, GROUND_Y - 110, 20, 30, 'glass'));
+    blocks.push(createBlock(bx + 30, GROUND_Y - 110, 20, 30, 'glass'));
+    blocks.push(createBlock(bx, GROUND_Y - 135, 80, 20, 'wood'));
+    enemies.push(createEnemy(bx - 20, GROUND_Y - 155));
+    enemies.push(createEnemy(bx + 20, GROUND_Y - 155));
+    enemies.push(createEnemy(bx, GROUND_Y - 50));
+  } else if (n === 4) {
+    shotsLeft = 7;
+    // Pyramid
+    for (let row = 0; row < 4; row++) {
+      const count = 5 - row;
+      const startX = bx - (count - 1) * 22;
+      const y = GROUND_Y - 20 - row * 40;
+      const mat = row < 2 ? 'stone' : (row === 2 ? 'wood' : 'glass');
+      for (let i = 0; i < count; i++) {
+        blocks.push(createBlock(startX + i * 44, y, 40, 35, mat));
+      }
+    }
+    enemies.push(createEnemy(bx, GROUND_Y - 180));
+    enemies.push(createEnemy(bx - 44, GROUND_Y - 140));
+    enemies.push(createEnemy(bx + 44, GROUND_Y - 140));
+  } else if (n >= 5) {
+    shotsLeft = 8;
+    // Random fortress
+    const bw = 120 + Math.random() * 80;
+    const bh = 3 + Math.floor(Math.random() * 3);
+    for (let row = 0; row < bh; row++) {
+      const count = Math.floor(bw / 44);
+      const startX = bx - (count - 1) * 22;
+      const y = GROUND_Y - 20 - row * 40;
+      const mat = ['wood', 'stone', 'glass'][Math.floor(Math.random() * 3)];
+      for (let i = 0; i < count; i++) {
+        blocks.push(createBlock(startX + i * 44, y, 40, 35, mat));
+      }
+    }
+    const eCount = 2 + Math.floor(Math.random() * 3);
+    for (let i = 0; i < eCount; i++) {
+      enemies.push(createEnemy(bx - 30 + Math.random() * 60, GROUND_Y - 40 - bh * 40 - Math.random() * 30));
+    }
+  }
+
+  Composite.add(world, [...blocks, ...enemies]);
+  projectile = createProjectile(ballistaPos.x + 40, ballistaPos.y - 20);
+  Body.setStatic(projectile, true);
+  Composite.add(world, projectile);
+
+  updateUI();
+}
+
+function updateUI() {
+  scoreEl.textContent = `Score: ${score}`;
+  shotsEl.textContent = `🏹 ${shotsLeft}`;
+  levelEl.textContent = `Level ${level}`;
+}
+
+function fireBallista(power, angle) {
+  if (projectileFired || shotsLeft <= 0) return;
+  projectileFired = true;
+  shotsLeft--;
+  Body.setStatic(projectile, false);
+  Body.setVelocity(projectile, {
+    x: Math.cos(angle) * power,
+    y: Math.sin(angle) * power
+  });
+  Body.setAngularVelocity(projectile, 0.1);
+  firedProjectiles.push(projectile);
+  updateUI();
+}
+
+function nextShot() {
+  if (shotsLeft <= 0) {
+    checkLevelEnd();
+    return;
+  }
+  projectileFired = false;
+  settled = false;
+  settleTimer = 0;
+  projectile = createProjectile(ballistaPos.x + 40, ballistaPos.y - 20);
+  Body.setStatic(projectile, true);
+  Composite.add(world, projectile);
+}
+
+function checkLevelEnd() {
+  const alive = enemies.filter(e => e.hp > 0);
+  if (alive.length === 0 && !levelComplete) {
+    levelComplete = true;
+    stars = shotsLeft >= 3 ? 3 : (shotsLeft >= 1 ? 2 : 1);
+    score += stars * 500;
+    updateUI();
+    setTimeout(() => showOverlay('win'), 1500);
+  } else if (shotsLeft <= 0 && !levelComplete) {
+    levelFailed = true;
+    setTimeout(() => showOverlay('lose'), 2000);
+  }
+}
+
+function showOverlay(type) {
+  overlay.classList.remove('hidden');
+  if (type === 'win') {
+    overlay.innerHTML = `
+      <h1>⚔️ Victory!</h1>
+      <div class="stars">${'⭐'.repeat(stars)}${'☆'.repeat(3 - stars)}</div>
+      <h2>Score: ${score}</h2>
+      <p>Shots remaining: ${shotsLeft}</p>
+      <button class="btn" onclick="nextLevel()">Next Level</button>
+    `;
+  } else {
+    overlay.innerHTML = `
+      <h1>💀 Defeat</h1>
+      <p>Enemies survived! Try again?</p>
+      <button class="btn" onclick="retryLevel()">Retry</button>
+    `;
+  }
+}
+
+function nextLevel() {
+  level++;
+  loadLevel(level);
+  overlay.classList.add('hidden');
+}
+
+function retryLevel() {
+  loadLevel(level);
+  overlay.classList.add('hidden');
+}
+
+// Collision handling
+Events.on(engine, 'collisionStart', (event) => {
+  for (const pair of event.pairs) {
+    const { bodyA, bodyB } = pair;
+
+    // Projectile hits block
+    if (bodyA.isProjectile && bodyB.isBlock) handleHit(bodyB, bodyA);
+    else if (bodyB.isProjectile && bodyA.isBlock) handleHit(bodyA, bodyB);
+
+    // Projectile hits enemy
+    if (bodyA.isProjectile && bodyB.isEnemy) handleEnemyHit(bodyB);
+    else if (bodyB.isProjectile && bodyA.isEnemy) handleEnemyHit(bodyA);
+
+    // Block falls on enemy
+    if (bodyA.isBlock && bodyB.isEnemy) {
+      const speed = Vector.magnitude(Vector.sub(bodyA.velocity, bodyB.velocity));
+      if (speed > 2) handleEnemyHit(bodyB);
+    }
+    if (bodyB.isBlock && bodyA.isEnemy) {
+      const speed = Vector.magnitude(Vector.sub(bodyB.velocity, bodyA.velocity));
+      if (speed > 2) handleEnemyHit(bodyA);
+    }
+
+    // Block hits block
+    if (bodyA.isBlock && bodyB.isBlock) {
+      const speed = Vector.magnitude(Vector.sub(bodyA.velocity, bodyB.velocity));
+      if (speed > 3) {
+        handleHit(bodyA, bodyB);
+        handleHit(bodyB, bodyA);
+      }
+    }
+  }
+});
+
+function handleHit(block, hitter) {
+  if (block.hp <= 0) return;
+  const speed = hitter.isProjectile
+    ? Vector.magnitude(hitter.velocity)
+    : Vector.magnitude(Vector.sub(block.velocity, hitter.velocity));
+  const dmg = hitter.isProjectile ? 2 : 1;
+  if (speed > 2) {
+    block.hp -= dmg;
+    score += 50;
+    updateUI();
+    if (block.hp <= 0) {
+      // Destroy block with particles
+      createDebris(block.position.x, block.position.y, block.breakColor || block.color, 5);
+      Composite.remove(world, block);
+    }
+  }
+}
+
+function handleEnemyHit(enemy) {
+  if (enemy.hp <= 0) return;
+  enemy.hp--;
+  score += 200;
+  updateUI();
+  createDebris(enemy.position.x, enemy.position.y, '#cc3333', 8);
+  Composite.remove(world, enemy);
+  checkLevelEnd();
+}
+
+// Particles
+let particles = [];
+function createDebris(x, y, color, count) {
+  for (let i = 0; i < count; i++) {
+    particles.push({
+      x, y,
+      vx: (Math.random() - 0.5) * 8,
+      vy: -Math.random() * 6 - 2,
+      size: 2 + Math.random() * 5,
+      color,
+      life: 1.0,
+      rotation: Math.random() * Math.PI * 2
+    });
+  }
+}
+
+function updateParticles() {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.x += p.vx;
+    p.y += p.vy;
+    p.vy += 0.3;
+    p.life -= 0.02;
+    p.rotation += 0.1;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+// Drawing
+function drawBackground() {
+  // Sky gradient
+  const grad = ctx.createLinearGradient(0, 0, 0, GROUND_Y);
+  grad.addColorStop(0, '#87CEEB');
+  grad.addColorStop(0.5, '#B0E0E6');
+  grad.addColorStop(1, '#E0F0E0');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, GROUND_Y);
+
+  // Clouds
+  ctx.fillStyle = 'rgba(255,255,255,0.6)';
+  drawCloud(W * 0.2, 60, 40);
+  drawCloud(W * 0.5, 90, 30);
+  drawCloud(W * 0.8, 50, 35);
+
+  // Ground
+  const gGrad = ctx.createLinearGradient(0, GROUND_Y, 0, H);
+  gGrad.addColorStop(0, '#5a8f3f');
+  gGrad.addColorStop(0.3, '#4a7c3f');
+  gGrad.addColorStop(1, '#3a5c2f');
+  ctx.fillStyle = gGrad;
+  ctx.fillRect(0, GROUND_Y, W, H - GROUND_Y);
+
+  // Grass line
+  ctx.strokeStyle = '#6aaf4f';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(0, GROUND_Y);
+  ctx.lineTo(W, GROUND_Y);
+  ctx.stroke();
+}
+
+function drawCloud(x, y, size) {
+  ctx.beginPath();
+  ctx.arc(x, y, size, 0, Math.PI * 2);
+  ctx.arc(x + size * 0.8, y - size * 0.3, size * 0.7, 0, Math.PI * 2);
+  ctx.arc(x + size * 1.5, y, size * 0.8, 0, Math.PI * 2);
+  ctx.arc(x + size * 0.6, y + size * 0.2, size * 0.5, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawBallista() {
+  const bx = ballistaPos.x;
+  const by = ballistaPos.y;
+
+  // Base/platform
+  ctx.fillStyle = '#5C3317';
+  ctx.fillRect(bx - 35, by - 5, 70, 15);
+  ctx.fillStyle = '#4A2810';
+  ctx.fillRect(bx - 40, by + 8, 80, 10);
+
+  // Wheels
+  ctx.fillStyle = '#3a2010';
+  ctx.strokeStyle = '#5C3317';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(bx - 25, by + 15, 10, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.arc(bx + 25, by + 15, 10, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+
+  // Frame
+  ctx.fillStyle = '#6B3A1F';
+  ctx.fillRect(bx - 5, by - 40, 10, 40);
+
+  // Arms (aim direction)
+  let armAngle = -Math.PI / 4;
+  if (aiming && aimStart && aimCurrent) {
+    const dx = aimStart.x - aimCurrent.x;
+    const dy = aimStart.y - aimCurrent.y;
+    armAngle = Math.atan2(dy, dx);
+    if (armAngle > 0) armAngle = 0;
+    if (armAngle < -Math.PI / 2) armAngle = -Math.PI / 2;
+  }
+
+  ctx.save();
+  ctx.translate(bx, by - 35);
+  ctx.rotate(armAngle);
+
+  // Left arm
+  ctx.fillStyle = '#5C3317';
+  ctx.save();
+  ctx.rotate(-0.1);
+  ctx.fillRect(0, -4, 55, 8);
+  ctx.restore();
+
+  // Right arm
+  ctx.save();
+  ctx.rotate(0.1);
+  ctx.fillRect(0, -4, 55, 8);
+  ctx.restore();
+
+  // Bowstring
+  ctx.strokeStyle = '#8B7355';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  const strLen = 50;
+  ctx.moveTo(Math.cos(-0.1) * strLen, Math.sin(-0.1) * strLen);
+  if (aiming && aimStart && aimCurrent) {
+    const pullDist = Math.min(Math.hypot(aimStart.x - aimCurrent.x, aimStart.y - aimCurrent.y), 80);
+    ctx.lineTo(0, pullDist * 0.3);
+  } else {
+    ctx.lineTo(0, 5);
+  }
+  ctx.lineTo(Math.cos(0.1) * strLen, Math.sin(0.1) * strLen);
+  ctx.stroke();
+
+  ctx.restore();
+
+  // Draw projectile on ballista if not fired
+  if (projectile && !projectileFired) {
+    const px = bx + Math.cos(armAngle) * 45;
+    const py = (by - 35) + Math.sin(armAngle) * 45;
+    drawProjectileSprite(px, py);
+  }
+}
+
+function drawProjectileSprite(x, y) {
+  // Boulder/cannonball
+  ctx.fillStyle = '#444';
+  ctx.beginPath();
+  ctx.arc(x, y, PROJECTILE_RADIUS, 0, Math.PI * 2);
+  ctx.fill();
+  const grad = ctx.createRadialGradient(x - 3, y - 3, 1, x, y, PROJECTILE_RADIUS);
+  grad.addColorStop(0, 'rgba(255,255,255,0.3)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.2)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+  ctx.strokeStyle = '#333';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+}
+
+function drawBlock(b) {
+  const verts = b.vertices;
+  const hpRatio = b.hp / b.maxHp;
+
+  ctx.save();
+  ctx.translate(b.position.x, b.position.y);
+  ctx.rotate(b.angle);
+
+  // Main block
+  ctx.fillStyle = b.color;
+  if (b.material === 'wood') {
+    // Wood texture lines
+    ctx.fillRect(-b.width / 2, -b.height / 2, b.width, b.height);
+    ctx.strokeStyle = 'rgba(0,0,0,0.15)';
+    ctx.lineWidth = 1;
+    for (let i = -b.width / 2 + 5; i < b.width / 2; i += 8) {
+      ctx.beginPath();
+      ctx.moveTo(i, -b.height / 2);
+      ctx.lineTo(i + 2, b.height / 2);
+      ctx.stroke();
+    }
+  } else if (b.material === 'stone') {
+    ctx.fillRect(-b.width / 2, -b.height / 2, b.width, b.height);
+    ctx.strokeStyle = 'rgba(0,0,0,0.2)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-b.width / 2, -b.height / 2, b.width, b.height);
+    // Stone texture dots
+    ctx.fillStyle = 'rgba(0,0,0,0.1)';
+    for (let i = 0; i < 3; i++) {
+      const rx = (Math.random() - 0.5) * b.width * 0.6;
+      const ry = (Math.random() - 0.5) * b.height * 0.6;
+      ctx.fillRect(rx, ry, 3, 3);
+    }
+  } else if (b.material === 'glass') {
+    ctx.globalAlpha = 0.7;
+    ctx.fillStyle = b.color;
+    ctx.fillRect(-b.width / 2, -b.height / 2, b.width, b.height);
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(-b.width / 2 + 2, -b.height / 2 + 2, b.width * 0.3, b.height * 0.3);
+    ctx.globalAlpha = 1;
+  }
+
+  // Damage cracks
+  if (hpRatio < 1) {
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(-b.width * 0.2, -b.height * 0.3);
+    ctx.lineTo(b.width * 0.1, 0);
+    ctx.lineTo(b.width * 0.2, b.height * 0.3);
+    ctx.stroke();
+    if (hpRatio < 0.5) {
+      ctx.beginPath();
+      ctx.moveTo(b.width * 0.1, 0);
+      ctx.lineTo(-b.width * 0.1, b.height * 0.2);
+      ctx.stroke();
+    }
+  }
+
+  // Border
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(-b.width / 2, -b.height / 2, b.width, b.height);
+
+  ctx.restore();
+}
+
+function drawEnemy(e) {
+  const x = e.position.x;
+  const y = e.position.y;
+  const r = e.radius;
+
+  // Body (red circle with face)
+  ctx.fillStyle = '#cc3333';
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Highlight
+  const grad = ctx.createRadialGradient(x - 3, y - 3, 1, x, y, r);
+  grad.addColorStop(0, 'rgba(255,100,100,0.5)');
+  grad.addColorStop(1, 'rgba(0,0,0,0.2)');
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  // Eyes
+  ctx.fillStyle = '#fff';
+  ctx.beginPath(); ctx.arc(x - 5, y - 3, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 5, y - 3, 4, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.beginPath(); ctx.arc(x - 5, y - 3, 2, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(x + 5, y - 3, 2, 0, Math.PI * 2); ctx.fill();
+
+  // Angry eyebrows
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x - 9, y - 8); ctx.lineTo(x - 2, y - 6); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x + 9, y - 8); ctx.lineTo(x + 2, y - 6); ctx.stroke();
+
+  // Mouth
+  ctx.strokeStyle = '#000';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.arc(x, y + 5, 4, 0, Math.PI);
+  ctx.stroke();
+}
+
+function drawAimGuide() {
+  if (!aiming || !aimStart || !aimCurrent || projectileFired) return;
+
+  const dx = aimStart.x - aimCurrent.x;
+  const dy = aimStart.y - aimCurrent.y;
+  const power = Math.min(Math.hypot(dx, dy) * BALLISTA_POWER, 20);
+  const angle = Math.atan2(dy, dx);
+
+  if (angle > 0) return; // Don't aim down
+
+  // Trajectory preview
+  ctx.save();
+  ctx.setLineDash([4, 6]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+
+  let sx = ballistaPos.x + 40;
+  let sy = ballistaPos.y - 20;
+  let vx = Math.cos(angle) * power;
+  let vy = Math.sin(angle) * power;
+
+  ctx.moveTo(sx, sy);
+  for (let i = 0; i < 40; i++) {
+    sx += vx;
+    sy += vy;
+    vy += 0.5; // gravity
+    if (sy > GROUND_Y) break;
+    ctx.lineTo(sx, sy);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  // Power indicator
+  const powerPct = Math.min(Math.hypot(dx, dy) / 80, 1);
+  const barW = 60;
+  const barH = 8;
+  const barX = ballistaPos.x - barW / 2;
+  const barY = ballistaPos.y + 30;
+  ctx.fillStyle = 'rgba(0,0,0,0.4)';
+  ctx.fillRect(barX, barY, barW, barH);
+  const color = powerPct < 0.5 ? '#4CAF50' : (powerPct < 0.8 ? '#FFC107' : '#F44336');
+  ctx.fillStyle = color;
+  ctx.fillRect(barX, barY, barW * powerPct, barH);
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(barX, barY, barW, barH);
+}
+
+function drawParticles() {
+  for (const p of particles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rotation);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+    ctx.restore();
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  drawBackground();
+
+  // Draw blocks
+  for (const b of blocks) {
+    if (b.hp > 0) drawBlock(b);
+  }
+
+  // Draw enemies
+  for (const e of enemies) {
+    if (e.hp > 0) drawEnemy(e);
+  }
+
+  // Draw fired projectiles
+  for (const p of firedProjectiles) {
+    if (p.position.y < H + 50) {
+      drawProjectileSprite(p.position.x, p.position.y);
+    }
+  }
+
+  drawParticles();
+  drawBallista();
+  drawAimGuide();
+}
+
+function checkSettled() {
+  if (!projectileFired || settled || levelComplete || levelFailed) return;
+
+  let allSlow = true;
+  for (const body of Composite.allBodies(world)) {
+    if (body.isStatic) continue;
+    const speed = Vector.magnitude(body.velocity);
+    if (speed > SETTLE_THRESHOLD) { allSlow = false; break; }
+  }
+
+  if (allSlow) {
+    settleTimer++;
+    if (settleTimer > 60) {
+      settled = true;
+      setTimeout(() => nextShot(), 800);
+    }
+  } else {
+    settleTimer = 0;
+  }
+}
+
+// Input handling
+function getPos(e) {
+  if (e.touches) return { x: e.touches[0].clientX, y: e.touches[0].clientY };
+  return { x: e.clientX, y: e.clientY };
+}
+
+function handleDown(e) {
+  e.preventDefault();
+  if (projectileFired || levelComplete || levelFailed) return;
+  const pos = getPos(e);
+  // Only start aiming if near the ballista area
+  if (pos.x < W * 0.3 && pos.y > GROUND_Y - 100) {
+    aiming = true;
+    aimStart = { x: ballistaPos.x + 40, y: ballistaPos.y - 20 };
+    aimCurrent = pos;
+  }
+}
+
+function handleMove(e) {
+  e.preventDefault();
+  if (aiming) {
+    aimCurrent = getPos(e);
+  }
+}
+
+function handleUp(e) {
+  e.preventDefault();
+  if (aiming && aimStart && aimCurrent && !projectileFired) {
+    const dx = aimStart.x - aimCurrent.x;
+    const dy = aimStart.y - aimCurrent.y;
+    const power = Math.min(Math.hypot(dx, dy) * BALLISTA_POWER, 20);
+    const angle = Math.atan2(dy, dx);
+    if (power > 1 && angle < 0) {
+      fireBallista(power, angle);
+    }
+  }
+  aiming = false;
+  aimStart = null;
+  aimCurrent = null;
+}
+
+canvas.addEventListener('mousedown', handleDown);
+canvas.addEventListener('mousemove', handleMove);
+canvas.addEventListener('mouseup', handleUp);
+canvas.addEventListener('touchstart', handleDown, { passive: false });
+canvas.addEventListener('touchmove', handleMove, { passive: false });
+canvas.addEventListener('touchend', handleUp, { passive: false });
+
+// Game loop
+let lastTime = 0;
+function gameLoop(timestamp) {
+  const delta = timestamp - lastTime;
+  lastTime = timestamp;
+
+  if (!levelComplete && !levelFailed) {
+    Engine.update(engine, Math.min(delta, 20));
+    checkSettled();
+  }
+
+  updateParticles();
+  draw();
+  requestAnimationFrame(gameLoop);
+}
+
+function startGame() {
+  score = 0;
+  level = 1;
+  overlay.classList.add('hidden');
+  loadLevel(level);
+}
+
+startBtn.addEventListener('click', startGame);
+startBtn.addEventListener('touchend', (e) => { e.preventDefault(); startGame(); });
+
+window.addEventListener('resize', () => {
+  resize();
+  if (engine) {
+    Body.setPosition(groundBody, { x: W / 2, y: GROUND_Y + 25 });
+    Body.setPosition(wallBodies[1], { x: -25, y: H / 2 });
+    Body.setPosition(wallBodies[2], { x: W + 25, y: H / 2 });
+  }
+});
+
+resize();
+initPhysics();
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
